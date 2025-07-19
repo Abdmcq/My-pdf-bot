@@ -36,8 +36,6 @@ OWNER_ID = int(os.getenv('OWNER_ID', 0))
 # --- التحقق من وجود المتغيرات ---
 if not all([TOKEN, GEMINI_API_KEY, OWNER_ID, URL]):
     logger.critical("FATAL ERROR: One or more environment variables are not set!")
-    # في حالة عدم وجود المتغيرات، سيتوقف التطبيق
-    # هذا يمنع الأخطاء غير المتوقعة
     exit()
 
 # --- تعريفات وثوابت البوت ---
@@ -59,7 +57,6 @@ def generate_mcqs_text_blob_with_gemini(text_content: str, num_questions: int, l
     api_model = "gemini-1.5-flash-latest"
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={GEMINI_API_KEY}"
     text_content = text_content[:20000]
-
     prompt = f"Generate exactly {num_questions} MCQs in {language} from the text below. STRICT FORMAT: Question: [text]\nA) [text]\nB) [text]\nC) [text]\nD) [text]\nCorrect Answer: [A,B,C, or D]\n---\nText: \"\"\"{text_content}\"\"\""
     payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.4, "maxOutputTokens": 8192}}
     headers = {'Content-Type': 'application/json'}
@@ -148,9 +145,10 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- إعداد الخادم والبوت (الهيكلة الجديدة) ---
+# --- الهيكلة الجديدة والنهائية ---
 
 # 1. إعداد تطبيق البوت وإضافة الأوامر
+# يتم هذا بشكل متزامن عند تحميل الملف
 ptb_application = Application.builder().token(TOKEN).build()
 conv_handler = ConversationHandler(
     entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
@@ -165,19 +163,25 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return "Bot is alive!"
+    return "Bot is alive and running successfully!"
 
 @app.route("/webhook", methods=['POST'])
 async def webhook():
+    """هذا المسار يستقبل التحديثات من تليجرام ويعالجها"""
     await ptb_application.process_update(Update.de_json(request.get_json(force=True), ptb_application.bot))
     return "ok"
 
 # 3. دالة لتشغيل إعداد الـ Webhook مرة واحدة عند بدء التشغيل
-async def setup():
+async def setup_webhook():
+    """هذه الدالة تخبر تليجرام أين يرسل التحديثات"""
     await ptb_application.bot.set_webhook(url=f"{URL}/webhook", allowed_updates=Update.ALL_TYPES)
+    logger.info(f"Webhook set up on {URL}/webhook")
 
 # 4. تشغيل الإعداد عند بدء الخادم
 # هذا الكود يعمل فقط عندما يتم تشغيل التطبيق بواسطة Gunicorn على Render
+# وليس عند تشغيله محلياً
 if __name__ != "__main__":
-    asyncio.run(setup())
+    # استخدام asyncio.run() لتشغيل الدالة غير المتزامنة
+    # هذا يضمن أن الـ webhook يتم إعداده قبل أن يبدأ الخادم في استقبال الطلبات
+    asyncio.run(setup_webhook())
 
