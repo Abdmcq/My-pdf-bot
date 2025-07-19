@@ -6,178 +6,167 @@ import tempfile
 import re
 import requests
 import json
-import asyncio
-from datetime import datetime
+import time
 
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    ConversationHandler,
-)
+import telebot
+from telebot.types import Update
 from PyPDF2 import PdfReader
 
 # --- إعدادات أساسية ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = telebot.logger
+telebot.logger.setLevel(logging.INFO)
 
-# --- المتغيرات السرية (مضمنة في الكود للاستخدام الشخصي) ---
+# --- المتغيرات السرية (مضمنة في الكود) ---
 TOKEN = "7892395794:AAEUNB1UygFFcCbl7vxoEvH_DFGhjkfOlg8"
 GEMINI_API_KEY = "AIzaSyCtGuhftV0VQCWZpYS3KTMWHoLg__qpO3g"
 OWNER_ID = 1749717270
-
-# --- هذا المتغير يجب قراءته من Render دائماً ---
-# Render تقوم بتعيين هذا الرابط تلقائياً
 URL = os.getenv('RENDER_EXTERNAL_URL')
 
 # --- التحقق من وجود رابط الخادم ---
 if not URL:
-    logger.critical("FATAL ERROR: Could not determine the RENDER_EXTERNAL_URL. The bot cannot set a webhook.")
+    logger.critical("FATAL ERROR: RENDER_EXTERNAL_URL not found.")
     exit()
 
-# --- تعريفات وثوابت البوت ---
-OWNER_USERNAME = "ll7ddd"
-BOT_PROGRAMMER_NAME = "عبدالرحمن حسن"
-ASK_NUM_QUESTIONS_FOR_EXTRACTION = range(1)
+# --- إنشاء البوت وخادم الويب ---
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-# --- كل دوال البوت والمنطق الخاص بك (تبقى كما هي) ---
+# --- كل دوال البوت والمنطق الخاص بك (تمت إعادة برمجتها بالمكتبة الجديدة) ---
 def extract_text_from_pdf(pdf_path: str) -> str:
     try:
         reader = PdfReader(pdf_path)
-        text = "".join(page.extract_text() + "\n" for page in reader.pages if page.extract_text())
-        return text
+        return "".join(page.extract_text() + "\n" for page in reader.pages if page.extract_text())
     except Exception as e:
         logger.error(f"Error extracting PDF text: {e}")
         return ""
 
-def generate_mcqs_text_blob_with_gemini(text_content: str, num_questions: int, language: str = "English") -> str:
-    api_model = "gemini-1.5-flash-latest"
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={GEMINI_API_KEY}"
+def generate_mcqs_text_blob_with_gemini(text_content: str, num_questions: int) -> str:
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
     text_content = text_content[:20000]
-    prompt = f"Generate exactly {num_questions} MCQs in {language} from the text below. STRICT FORMAT: Question: [text]\nA) [text]\nB) [text]\nC) [text]\nD) [text]\nCorrect Answer: [A,B,C, or D]\n---\nText: \"\"\"{text_content}\"\"\""
+    prompt = f"Generate exactly {num_questions} MCQs in English from the text below. STRICT FORMAT: Question: [text]\nA) [text]\nB) [text]\nC) [text]\nD) [text]\nCorrect Answer: [A,B,C, or D]\n---\nText: \"\"\"{text_content}\"\"\""
     payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.4, "maxOutputTokens": 8192}}
-    headers = {'Content-Type': 'application/json'}
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=300)
+        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=300)
         response.raise_for_status()
         candidates = response.json().get("candidates")
-        if candidates:
-            return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-        return ""
+        return candidates[0]['content']['parts'][0]['text'].strip() if candidates else ""
     except Exception as e:
-        logger.error(f"Gemini API error: {e}", exc_info=True)
+        logger.error(f"Gemini API error: {e}")
         return ""
 
 mcq_parsing_pattern = re.compile(r"Question:\s*(.*?)\s*A\)\s*(.*?)\s*B\)\s*(.*?)\s*C\)\s*(.*?)\s*D\)\s*(.*?)\s*Correct Answer:\s*([A-D])", re.IGNORECASE | re.DOTALL)
 
-async def send_single_mcq_as_poll(mcq_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+def send_single_mcq_as_poll(mcq_text: str, message):
     match = mcq_parsing_pattern.search(mcq_text.strip())
-    if not match: return False
+    if not match: return
     try:
         question, opt_a, opt_b, opt_c, opt_d, correct_letter = [g.strip() for g in match.groups()]
         options = [opt_a, opt_b, opt_c, opt_d]
         correct_option_id = {'A': 0, 'B': 1, 'C': 2, 'D': 3}.get(correct_letter.upper())
-        if correct_option_id is None: return False
-        await context.bot.send_poll(chat_id=update.effective_chat.id, question=question, options=options, type='quiz', correct_option_id=correct_option_id)
-        return True
+        if correct_option_id is not None:
+            bot.send_poll(message.chat.id, question, options, type='quiz', correct_option_id=correct_option_id)
     except Exception as e:
-        logger.error(f"Error creating poll: {e}", exc_info=True)
-        return False
+        logger.error(f"Error creating poll: {e}")
 
-async def handle_restricted_access(update: Update, context: ContextTypes.DEFAULT_TYPE, feature: str):
-    await update.message.reply_text("عذراً، هذا البوت يعمل بشكل حصري لمبرمجه.")
+# --- معالجات الأوامر والرسائل ---
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return await handle_restricted_access(update, context, "start")
-    await update.message.reply_html(rf"مرحباً {update.effective_user.mention_html()}! أرسل ملف PDF.")
+# فلتر للتحقق من أن الرسالة من المالك فقط
+def is_owner(message):
+    return message.from_user.id == OWNER_ID
 
-async def handle_pdf_for_extraction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.effective_user.id != OWNER_ID:
-        await handle_restricted_access(update, context, "PDF Upload")
-        return ConversationHandler.END
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    json_string = request.get_data().decode('utf-8')
+    update = Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200
+
+@app.route('/')
+def index():
+    bot.remove_webhook()
+    time.sleep(1)
+    bot.set_webhook(url=f'{URL}/{TOKEN}')
+    return "Webhook set successfully!", 200
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    if not is_owner(message):
+        bot.reply_to(message, "عذراً، هذا البوت يعمل بشكل حصري لمبرمجه.")
+        return
+    bot.reply_to(message, f"مرحباً {message.from_user.first_name}! أرسل ملف PDF.")
+
+@bot.message_handler(content_types=['document'])
+def handle_pdf(message):
+    if not is_owner(message):
+        bot.reply_to(message, "عذراً، لا يمكنك استخدام هذه الميزة.")
+        return
     
-    document = update.message.document
-    await update.message.reply_text("تم استلام ملف PDF. جاري معالجة النص...")
-    pdf_file = await document.get_file()
+    if message.document.mime_type != 'application/pdf':
+        bot.reply_to(message, "من فضلك أرسل ملف PDF صالح.")
+        return
+
+    bot.reply_to(message, "تم استلام ملف PDF. جاري معالجة النص...")
+    file_info = bot.get_file(message.document.file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-        await pdf_file.download_to_drive(custom_path=temp_pdf.name)
-        text_content = extract_text_from_pdf(temp_pdf.name)
-    os.remove(temp_pdf.name)
+        temp_pdf.write(downloaded_file)
+        pdf_path = temp_pdf.name
+    
+    text_content = extract_text_from_pdf(pdf_path)
+    os.remove(pdf_path)
 
     if not text_content.strip():
-        await update.message.reply_text("لم أتمكن من استخراج أي نص.")
-        return ConversationHandler.END
+        bot.reply_to(message, "لم أتمكن من استخراج أي نص من الملف.")
+        return
 
-    context.user_data['pdf_text'] = text_content
-    await update.message.reply_text("النص استخرج. كم سؤال تريد؟")
-    return ASK_NUM_QUESTIONS_FOR_EXTRACTION
+    # حفظ النص في متغير مؤقت لاستخدامه في الخطوة التالية
+    user_data = {'pdf_text': text_content}
+    
+    msg = bot.reply_to(message, "النص استخرج. كم سؤال تريد؟")
+    bot.register_next_step_handler(msg, num_questions_received, user_data)
 
-async def num_questions_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+
+def num_questions_received(message, user_data):
     try:
-        num_questions = int(update.message.text)
+        num_questions = int(message.text)
         if num_questions < 1: raise ValueError
     except (ValueError, TypeError):
-        await update.message.reply_text("الرجاء إرسال رقم صحيح موجب.")
-        return ASK_NUM_QUESTIONS_FOR_EXTRACTION
+        bot.reply_to(message, "الرجاء إرسال رقم صحيح موجب.")
+        # نعيد تسجيل الخطوة مرة أخرى
+        new_msg = bot.reply_to(message, "كم سؤال تريد؟")
+        bot.register_next_step_handler(new_msg, num_questions_received, user_data)
+        return
 
-    pdf_text = context.user_data.pop('pdf_text', None)
+    pdf_text = user_data.get('pdf_text')
     if not pdf_text:
-        await update.message.reply_text("خطأ: نص PDF غير موجود.")
-        return ConversationHandler.END
+        bot.reply_to(message, "خطأ: نص PDF غير موجود. أعد إرسال الملف.")
+        return
 
-    await update.message.reply_text(f"جاري استخراج {num_questions} سؤالاً...")
+    bot.reply_to(message, f"جاري استخراج {num_questions} سؤالاً...")
     mcq_blob = generate_mcqs_text_blob_with_gemini(pdf_text, num_questions)
+    if not mcq_blob:
+        bot.reply_to(message, "فشل استخراج الأسئلة من Gemini API.")
+        return
+
     mcqs = [mcq.strip() for mcq in re.split(r'\s*---\s*', mcq_blob) if mcq.strip()]
-    await update.message.reply_text(f"تم إنشاء {len(mcqs)} سؤال. جاري إرسال الاختبارات...")
+    bot.reply_to(message, f"تم إنشاء {len(mcqs)} سؤال. جاري إرسال الاختبارات...")
+    
     for mcq in mcqs:
-        await send_single_mcq_as_poll(mcq, update, context)
-        await asyncio.sleep(0.2)
-    await update.message.reply_text("انتهت العملية.")
-    return ConversationHandler.END
+        send_single_mcq_as_poll(mcq, message)
+        time.sleep(0.5) # تأخير بسيط بين كل سؤال لتجنب حظر تليجرام
+    
+    bot.reply_to(message, "انتهت العملية.")
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.effective_user.id != OWNER_ID: return ConversationHandler.END
-    await update.message.reply_text("تم إلغاء العملية.")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-# --- الهيكلة الجديدة والنهائية ---
-
-# 1. إعداد تطبيق البوت بشكل متزامن
-ptb_application = Application.builder().token(TOKEN).build()
-conv_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
-    states={ASK_NUM_QUESTIONS_FOR_EXTRACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, num_questions_received)]},
-    fallbacks=[CommandHandler("cancel", cancel_command)],
-)
-ptb_application.add_handler(CommandHandler("start", start_command))
-ptb_application.add_handler(conv_handler)
-
-# 2. إعداد خادم الويب (Flask).
-app = Flask(__name__)
-
-@app.route("/")
-def index():
-    return "Bot is alive!"
-
-@app.route("/webhook", methods=['POST'])
-async def webhook():
-    await ptb_application.process_update(Update.de_json(request.get_json(force=True), ptb_application.bot))
-    return "ok"
-
-# 3. دالة لتشغيل إعداد الـ Webhook
-async def setup():
-    await ptb_application.bot.set_webhook(url=f"{URL}/webhook", allowed_updates=Update.ALL_TYPES)
-
-# 4. تشغيل الإعداد عند بدء الخادم
+# هذا الكود يضمن أن يتم إعداد الـ Webhook عند بدء تشغيل الخادم
+# Gunicorn سيقوم بتشغيل متغير 'app'
 if __name__ != "__main__":
-    asyncio.run(setup())
+    # إزالة أي webhook قديم وتعيين الجديد
+    bot.remove_webhook()
+    time.sleep(1)
+    bot.set_webhook(url=f'{URL}/{TOKEN}')
+    logger.info(f"Webhook set to {URL}/{TOKEN}")
 
 
