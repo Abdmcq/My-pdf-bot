@@ -13,10 +13,10 @@ import telebot
 from telebot.types import Update
 from PyPDF2 import PdfReader
 
-# --- إعدادات أساسية ---
-logging.basicConfig(level=logging.INFO)
-logger = telebot.logger
-telebot.logger.setLevel(logging.INFO)
+# --- إعدادات أساسية مع تتبع مفصل ---
+# هذا سيجعل سجلات Render أكثر فائدة
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- المتغيرات السرية (مضمنة في الكود) ---
 TOKEN = "7892395794:AAEUNB1UygFFcCbl7vxoEvH_DFGhjkfOlg8"
@@ -33,7 +33,7 @@ if not URL:
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# --- كل دوال البوت والمنطق الخاص بك (تمت إعادة برمجتها بالمكتبة الجديدة) ---
+# --- كل دوال البوت والمنطق الخاص بك ---
 def extract_text_from_pdf(pdf_path: str) -> str:
     try:
         reader = PdfReader(pdf_path)
@@ -60,7 +60,9 @@ mcq_parsing_pattern = re.compile(r"Question:\s*(.*?)\s*A\)\s*(.*?)\s*B\)\s*(.*?)
 
 def send_single_mcq_as_poll(mcq_text: str, message):
     match = mcq_parsing_pattern.search(mcq_text.strip())
-    if not match: return
+    if not match: 
+        logger.warning(f"Could not parse MCQ: {mcq_text[:100]}")
+        return
     try:
         question, opt_a, opt_b, opt_c, opt_d, correct_letter = [g.strip() for g in match.groups()]
         options = [opt_a, opt_b, opt_c, opt_d]
@@ -72,34 +74,41 @@ def send_single_mcq_as_poll(mcq_text: str, message):
 
 # --- معالجات الأوامر والرسائل ---
 
-# فلتر للتحقق من أن الرسالة من المالك فقط
 def is_owner(message):
     return message.from_user.id == OWNER_ID
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
+    logger.info("Webhook endpoint called!")
     json_string = request.get_data().decode('utf-8')
     update = Update.de_json(json_string)
     bot.process_new_updates([update])
+    logger.info("Update processed.")
     return "!", 200
 
 @app.route('/')
 def index():
+    logger.info("Index route called, setting webhook...")
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f'{URL}/{TOKEN}')
+    logger.info("Webhook has been set.")
     return "Webhook set successfully!", 200
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    logger.info(f"Received /start command from user {message.from_user.id}")
     if not is_owner(message):
+        logger.warning("Access denied for non-owner.")
         bot.reply_to(message, "عذراً، هذا البوت يعمل بشكل حصري لمبرمجه.")
         return
     bot.reply_to(message, f"مرحباً {message.from_user.first_name}! أرسل ملف PDF.")
 
 @bot.message_handler(content_types=['document'])
 def handle_pdf(message):
+    logger.info(f"Received a document from user {message.from_user.id}")
     if not is_owner(message):
+        logger.warning("PDF upload denied for non-owner.")
         bot.reply_to(message, "عذراً، لا يمكنك استخدام هذه الميزة.")
         return
     
@@ -122,20 +131,17 @@ def handle_pdf(message):
         bot.reply_to(message, "لم أتمكن من استخراج أي نص من الملف.")
         return
 
-    # حفظ النص في متغير مؤقت لاستخدامه في الخطوة التالية
     user_data = {'pdf_text': text_content}
-    
     msg = bot.reply_to(message, "النص استخرج. كم سؤال تريد؟")
     bot.register_next_step_handler(msg, num_questions_received, user_data)
 
-
 def num_questions_received(message, user_data):
+    logger.info(f"Received number of questions: {message.text}")
     try:
         num_questions = int(message.text)
         if num_questions < 1: raise ValueError
     except (ValueError, TypeError):
         bot.reply_to(message, "الرجاء إرسال رقم صحيح موجب.")
-        # نعيد تسجيل الخطوة مرة أخرى
         new_msg = bot.reply_to(message, "كم سؤال تريد؟")
         bot.register_next_step_handler(new_msg, num_questions_received, user_data)
         return
@@ -156,17 +162,16 @@ def num_questions_received(message, user_data):
     
     for mcq in mcqs:
         send_single_mcq_as_poll(mcq, message)
-        time.sleep(0.5) # تأخير بسيط بين كل سؤال لتجنب حظر تليجرام
+        time.sleep(0.5)
     
     bot.reply_to(message, "انتهت العملية.")
 
 # هذا الكود يضمن أن يتم إعداد الـ Webhook عند بدء تشغيل الخادم
-# Gunicorn سيقوم بتشغيل متغير 'app'
 if __name__ != "__main__":
-    # إزالة أي webhook قديم وتعيين الجديد
+    logger.info("Setting webhook on startup...")
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f'{URL}/{TOKEN}')
-    logger.info(f"Webhook set to {URL}/{TOKEN}")
+    logger.info("Webhook set.")
 
 
