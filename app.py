@@ -9,7 +9,6 @@ import json
 import asyncio
 from datetime import datetime
 
-from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -30,12 +29,11 @@ logger = logging.getLogger(__name__)
 # --- قراءة المتغيرات السرية من إعدادات Render ---
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-URL = os.getenv('RENDER_EXTERNAL_URL')
 OWNER_ID = int(os.getenv('OWNER_ID', 0))
 
 # --- التحقق من وجود المتغيرات ---
-if not all([TOKEN, GEMINI_API_KEY, OWNER_ID, URL]):
-    logger.critical("FATAL ERROR: One or more environment variables are not set!")
+if not all([TOKEN, GEMINI_API_KEY, OWNER_ID]):
+    logger.critical("FATAL ERROR: Environment variables are not set!")
     exit()
 
 # --- تعريفات وثوابت البوت ---
@@ -145,43 +143,24 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- الهيكلة الجديدة والنهائية ---
+def main() -> None:
+    """الدالة الرئيسية لتشغيل البوت."""
+    application = Application.builder().token(TOKEN).build()
+    
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
+        states={
+            ASK_NUM_QUESTIONS_FOR_EXTRACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, num_questions_received)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+    )
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(conv_handler)
+    
+    logger.info("Bot is starting in polling mode...")
+    # تشغيل البوت بنظام Polling
+    application.run_polling()
 
-# 1. إعداد تطبيق البوت وإضافة الأوامر
-# يتم هذا بشكل متزامن عند تحميل الملف
-ptb_application = Application.builder().token(TOKEN).build()
-conv_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
-    states={ASK_NUM_QUESTIONS_FOR_EXTRACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, num_questions_received)]},
-    fallbacks=[CommandHandler("cancel", cancel_command)],
-)
-ptb_application.add_handler(CommandHandler("start", start_command))
-ptb_application.add_handler(conv_handler)
-
-# 2. إعداد خادم الويب (Flask). هذا المتغير هو ما سيجده Gunicorn.
-app = Flask(__name__)
-
-@app.route("/")
-def index():
-    return "Bot is alive and running successfully!"
-
-@app.route("/webhook", methods=['POST'])
-async def webhook():
-    """هذا المسار يستقبل التحديثات من تليجرام ويعالجها"""
-    await ptb_application.process_update(Update.de_json(request.get_json(force=True), ptb_application.bot))
-    return "ok"
-
-# 3. دالة لتشغيل إعداد الـ Webhook مرة واحدة عند بدء التشغيل
-async def setup_webhook():
-    """هذه الدالة تخبر تليجرام أين يرسل التحديثات"""
-    await ptb_application.bot.set_webhook(url=f"{URL}/webhook", allowed_updates=Update.ALL_TYPES)
-    logger.info(f"Webhook set up on {URL}/webhook")
-
-# 4. تشغيل الإعداد عند بدء الخادم
-# هذا الكود يعمل فقط عندما يتم تشغيل التطبيق بواسطة Gunicorn على Render
-# وليس عند تشغيله محلياً
-if __name__ != "__main__":
-    # استخدام asyncio.run() لتشغيل الدالة غير المتزامنة
-    # هذا يضمن أن الـ webhook يتم إعداده قبل أن يبدأ الخادم في استقبال الطلبات
-    asyncio.run(setup_webhook())
+if __name__ == "__main__":
+    main()
 
