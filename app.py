@@ -29,26 +29,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- قراءة المتغيرات السرية من إعدادات Render ---
-# هذا هو الجزء الأكثر أماناً
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 URL = os.getenv('RENDER_EXTERNAL_URL')
-OWNER_ID = int(os.getenv('OWNER_ID', 0)) # تحويل الأيدي إلى رقم
+OWNER_ID = int(os.getenv('OWNER_ID', 0))
 
-# التحقق من وجود المتغيرات الأساسية
 if not TOKEN or not GEMINI_API_KEY or not OWNER_ID:
-    logger.critical("FATAL ERROR: Environment variables (TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, OWNER_ID) are not set!")
-    # في حالة عدم وجود المتغيرات، سيتوقف التطبيق
+    logger.critical("FATAL ERROR: Environment variables are not set!")
     exit()
 
-# --- تعريفات وثوابت البوت (من الكود الأصلي) ---
+# --- تعريفات وثوابت البوت ---
 OWNER_USERNAME = "ll7ddd"
 BOT_PROGRAMMER_NAME = "عبدالرحمن حسن"
 ASK_NUM_QUESTIONS_FOR_EXTRACTION = range(1)
 MCQS_FILENAME = "latest_mcqs.json"
 
-# --- كل دوال البوت والمنطق الخاص بك (تبقى كما هي تماماً) ---
-# (لقد نسختها بالكامل من ملفك)
+# --- كل دوال البوت والمنطق الخاص بك (تبقى كما هي) ---
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     try:
@@ -194,12 +190,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 # --- إعداد الخادم والبوت ---
-# هذه هي الدالة الرئيسية الجديدة التي تجمع كل شيء
-async def main():
-    # إنشاء تطبيق البوت
+async def setup_bot():
     application = Application.builder().token(TOKEN).build()
-
-    # تعريف المحادثة الخاصة باستخراج الأسئلة
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
         states={
@@ -207,33 +199,25 @@ async def main():
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
     )
-
-    # إضافة الأوامر والمحادثة إلى البوت
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(conv_handler)
-
-    # إعداد الـ Webhook
     await application.bot.set_webhook(url=f"{URL}/webhook")
+    return application
 
-    # إنشاء خادم Flask
-    flask_app = Flask(__name__)
+# --- الجزء الجديد والمهم: إنشاء تطبيق Flask ---
+app = Flask(__name__)
+# تشغيل دالة إعداد البوت والحصول على التطبيق الجاهز
+ptb_app = asyncio.run(setup_bot())
 
-    @flask_app.route("/")
-    def index():
-        return "Bot is alive!"
+@app.route("/")
+def index():
+    return "Bot is alive!"
 
-    @flask_app.route("/webhook", methods=['POST'])
-    async def webhook():
-        await application.process_update(
-            Update.de_json(request.get_json(force=True), application.bot)
-        )
-        return "ok"
-    
-    # إعادة تطبيق Flask ليتم تشغيله بواسطة Gunicorn
-    return flask_app
+@app.route("/webhook", methods=['POST'])
+async def webhook():
+    await ptb_app.process_update(
+        Update.de_json(request.get_json(force=True), ptb_app.bot)
+    )
+    return "ok"
 
-# هذا السطر مهم جداً لـ Render
-# يقوم بتشغيل الدالة الرئيسية ويجعل متغير 'app' متاحاً لـ Gunicorn
-if __name__ == "__main__":
-    app = asyncio.run(main())
 
