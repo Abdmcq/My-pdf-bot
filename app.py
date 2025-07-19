@@ -17,6 +17,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
+    PicklePersistence,
 )
 from PyPDF2 import PdfReader
 
@@ -26,18 +27,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- المتغيرات السرية (مضمنة في الكود) ---
+# --- المتغيرات السرية (مضمنة في الكود للاستخدام الشخصي) ---
 TOKEN = "7892395794:AAEUNB1UygFFcCbl7vxoEvH_DFGhjkfOlg8"
 GEMINI_API_KEY = "AIzaSyCtGuhftV0VQCWZpYS3KTMWHoLg__qpO3g"
 OWNER_ID = 1749717270
+
+# --- هذا المتغير يجب قراءته من Render دائماً ---
 URL = os.getenv('RENDER_EXTERNAL_URL')
 
+# --- التحقق من وجود رابط الخادم ---
 if not URL:
-    logger.critical("FATAL ERROR: RENDER_EXTERNAL_URL not found.")
+    logger.critical("FATAL ERROR: RENDER_EXTERNAL_URL not found. The bot cannot set a webhook.")
     exit()
 
 # --- تعريفات وثوابت البوت ---
 ASK_NUM_QUESTIONS_FOR_EXTRACTION = range(1)
+PERSISTENCE_FILE = "bot_persistence.pkl"
 
 # --- دوال البوت (تبقى كما هي) ---
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -64,7 +69,7 @@ def generate_mcqs_text_blob_with_gemini(text_content: str, num_questions: int) -
 
 mcq_parsing_pattern = re.compile(r"Question:\s*(.*?)\s*A\)\s*(.*?)\s*B\)\s*(.*?)\s*C\)\s*(.*?)\s*D\)\s*(.*?)\s*Correct Answer:\s*([A-D])", re.IGNORECASE | re.DOTALL)
 
-async def send_single_mcq_as_poll(mcq_text: str, chat_id, bot):
+async def send_single_mcq_as_poll(mcq_text: str, chat_id: int, bot):
     match = mcq_parsing_pattern.search(mcq_text.strip())
     if not match: return
     try:
@@ -76,19 +81,13 @@ async def send_single_mcq_as_poll(mcq_text: str, chat_id, bot):
     except Exception as e:
         logger.error(f"Error creating poll: {e}")
 
-async def handle_restricted_access(update: Update):
+async def restricted_access_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("عذراً، هذا البوت يعمل بشكل حصري لمبرمجه.")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return await handle_restricted_access(update)
     await update.message.reply_html(rf"مرحباً {update.effective_user.mention_html()}! أرسل ملف PDF.")
 
 async def handle_pdf_for_extraction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.effective_user.id != OWNER_ID:
-        await handle_restricted_access(update)
-        return ConversationHandler.END
-    
     document = update.message.document
     await update.message.reply_text("تم استلام ملف PDF. جاري معالجة النص...")
     pdf_file = await document.get_file()
@@ -131,25 +130,35 @@ async def num_questions_received(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.effective_user.id != OWNER_ID: return ConversationHandler.END
     await update.message.reply_text("تم إلغاء العملية.")
     context.user_data.clear()
     return ConversationHandler.END
 
 # --- الهيكلة الجديدة والنهائية ---
-# هذه هي الطريقة الصحيحة لدمج PTB مع Flask/Gunicorn
 
-# 1. إعداد تطبيق البوت بشكل منفصل
-ptb_app = Application.builder().token(TOKEN).build()
-conv_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
-    states={ASK_NUM_QUESTIONS_FOR_EXTRACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, num_questions_received)]},
-    fallbacks=[CommandHandler("cancel", cancel_command)],
+# 1. إعداد تطبيق البوت
+persistence = PicklePersistence(filepath=PERSISTENCE_FILE)
+application = (
+    Application.builder()
+    .token(TOKEN)
+    .persistence(persistence)
+    .build()
 )
-ptb_app.add_handler(CommandHandler("start", start_command))
-ptb_app.add_handler(conv_handler)
 
-# 2. إعداد خادم الويب (Flask)
+# 2. إضافة الأوامر والمحادثات
+owner_filter = filters.User(user_id=OWNER_ID)
+conv_handler = ConversationHandler(
+    entry_points=[MessageHandler(filters.Document.PDF & owner_filter, handle_pdf_for_extraction)],
+    states={
+        ASK_NUM_QUESTIONS_FOR_EXTRACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND & owner_filter, num_questions_received)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_command, filters=owner_filter)],
+)
+application.add_handler(CommandHandler("start", start_command, filters=owner_filter))
+application.add_handler(conv_handler)
+application.add_handler(MessageHandler(filters.ALL & ~owner_filter, restricted_access_handler))
+
+# 3. إعداد خادم الويب (Flask)
 app = Flask(__name__)
 
 @app.route("/")
@@ -158,20 +167,23 @@ def index():
 
 @app.route("/webhook", methods=['POST'])
 async def webhook():
-    update = Update.de_json(request.get_json(force=True), ptb_app.bot)
-    # تشغيل معالجة التحديث في الخلفية لتجنب تأخير الرد على تليجرام
-    asyncio.create_task(ptb_app.process_update(update))
+    await application.update_queue.put(
+        Update.de_json(request.get_json(force=True), application.bot)
+    )
     return "ok"
 
-# 3. دالة لتشغيل البوت وإعداد الـ Webhook
-async def run_bot():
-    await ptb_app.initialize()
-    await ptb_app.bot.set_webhook(url=f"{URL}/webhook", allowed_updates=Update.ALL_TYPES)
-    logger.info(f"Webhook set on {URL}/webhook")
+# 4. دالة لتشغيل البوت وإعداد الـ Webhook
+async def main():
+    async with application:
+        await application.bot.set_webhook(url=f"{URL}/webhook", allowed_updates=Update.ALL_TYPES)
+        await application.start()
+        logger.info("Application started, waiting for updates...")
+        await asyncio.Event().wait()
 
-# 4. تشغيل الإعداد عند بدء الخادم
-# هذا يضمن أن يتم إعداد الـ webhook مرة واحدة فقط
-if __name__ != "__main__":
-    asyncio.run(run_bot())
+# 5. تشغيل الإعداد عند بدء الخادم
+if __name__ == "__main__":
+    application.run_polling()
+else:
+    asyncio.run(main())
 
 
