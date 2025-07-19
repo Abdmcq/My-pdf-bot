@@ -9,6 +9,7 @@ import json
 import asyncio
 from datetime import datetime
 
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -26,14 +27,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- قراءة المتغيرات السرية من إعدادات Render ---
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-OWNER_ID = int(os.getenv('OWNER_ID', 0))
+# --- المتغيرات السرية (مضمنة في الكود للاستخدام الشخصي) ---
+TOKEN = "7892395794:AAEUNB1UygFFcCbl7vxoEvH_DFGhjkfOlg8"
+GEMINI_API_KEY = "AIzaSyCtGuhftV0VQCWZpYS3KTMWHoLg__qpO3g"
+OWNER_ID = 1749717270
 
-# --- التحقق من وجود المتغيرات ---
-if not all([TOKEN, GEMINI_API_KEY, OWNER_ID]):
-    logger.critical("FATAL ERROR: Environment variables are not set! Please check TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, and OWNER_ID in Render settings.")
+# --- هذا المتغير يجب قراءته من Render دائماً ---
+# Render تقوم بتعيين هذا الرابط تلقائياً
+URL = os.getenv('RENDER_EXTERNAL_URL')
+
+# --- التحقق من وجود رابط الخادم ---
+if not URL:
+    logger.critical("FATAL ERROR: Could not determine the RENDER_EXTERNAL_URL. The bot cannot set a webhook.")
     exit()
 
 # --- تعريفات وثوابت البوت ---
@@ -143,24 +148,36 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.clear()
     return ConversationHandler.END
 
-def main() -> None:
-    """الدالة الرئيسية لتشغيل البوت."""
-    application = Application.builder().token(TOKEN).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
-        states={
-            ASK_NUM_QUESTIONS_FOR_EXTRACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, num_questions_received)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)],
-    )
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(conv_handler)
-    
-    logger.info("Bot is starting in polling mode...")
-    # تشغيل البوت بنظام Polling
-    application.run_polling()
+# --- الهيكلة الجديدة والنهائية ---
 
-if __name__ == "__main__":
-    main()
+# 1. إعداد تطبيق البوت بشكل متزامن
+ptb_application = Application.builder().token(TOKEN).build()
+conv_handler = ConversationHandler(
+    entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
+    states={ASK_NUM_QUESTIONS_FOR_EXTRACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, num_questions_received)]},
+    fallbacks=[CommandHandler("cancel", cancel_command)],
+)
+ptb_application.add_handler(CommandHandler("start", start_command))
+ptb_application.add_handler(conv_handler)
+
+# 2. إعداد خادم الويب (Flask).
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "Bot is alive!"
+
+@app.route("/webhook", methods=['POST'])
+async def webhook():
+    await ptb_application.process_update(Update.de_json(request.get_json(force=True), ptb_application.bot))
+    return "ok"
+
+# 3. دالة لتشغيل إعداد الـ Webhook
+async def setup():
+    await ptb_application.bot.set_webhook(url=f"{URL}/webhook", allowed_updates=Update.ALL_TYPES)
+
+# 4. تشغيل الإعداد عند بدء الخادم
+if __name__ != "__main__":
+    asyncio.run(setup())
+
 
