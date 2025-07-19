@@ -33,7 +33,7 @@ OWNER_ID = int(os.getenv('OWNER_ID', 0))
 
 # --- التحقق من وجود المتغيرات ---
 if not all([TOKEN, GEMINI_API_KEY, OWNER_ID]):
-    logger.critical("FATAL ERROR: Environment variables are not set!")
+    logger.critical("FATAL ERROR: Environment variables are not set! Please check TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, and OWNER_ID in Render settings.")
     exit()
 
 # --- تعريفات وثوابت البوت ---
